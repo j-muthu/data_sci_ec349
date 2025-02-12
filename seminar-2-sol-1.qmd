@@ -1,0 +1,503 @@
+---
+title: "Predicting heart disease"
+author: Josh Muthu
+date: 9 February 2025
+format: html
+---
+
+The following proposed solution uses the "Heart.csv" file to predict incidences of heart disease among patients (i.e. the "AHD" variable). As this is a discrete outcome, some methods will use classification models. 
+
+## loading packages & data
+```{r}
+#| output: false
+#| warning: false
+rm(list = ls())
+library(tidyverse)
+library(glmnet)
+library(tree)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+
+# read in csv
+heart_raw <- read_csv("seminar-material/Heart.csv")
+```
+
+## Clean data & prepare training + testing files
+Convert categorical variables to factors
+```{r}
+heart_cleaned = heart_raw %>%
+  drop_na() %>%
+  mutate(across(c(ChestPain, Thal), factor)) %>%
+  mutate(AHD = ifelse(AHD == "No",
+                      0,
+                      1)) %>%
+  select(-...1)
+```
+
+Create training and test data
+```{r}
+set.seed(1)
+training_list = sample(1:nrow(heart_cleaned), 3*nrow(heart_cleaned)/4)
+training_set = heart_cleaned %>%
+  filter(row_number() %in% training_list)
+
+# covariates in training set
+training_set_x = training_set %>%
+  select(-AHD)
+
+# y var in training set
+training_set_y = training_set %>%
+  select(AHD)
+
+test_set = heart_cleaned %>%
+  filter(!row_number() %in% training_list)
+
+# covariates in test set
+test_set_x = test_set %>%
+  select(-AHD)
+
+# y var in test set
+test_set_y = test_set %>%
+  select(AHD)
+```
+
+## Linear Probability Model
+
+Estimate LPM
+```{r}
+lm_heart = lm(AHD ~., data = training_set)
+summary(lm_heart)
+```
+
+Compute and plot predicted values
+```{r}
+lm_pred = predict(lm_heart, newdata = test_set_x)
+
+# add to a predictions dataset
+predictions_dataset = test_set_y %>%
+  add_column(lm_pred)
+
+# plotting predictions against actual values of AHD
+# plus regression line (with standard errors)
+ggplot(predictions_dataset, aes(x = lm_pred, y = AHD)) + 
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE)
+```
+
+Compute and store MSE
+```{r}
+mse_lm = mean((predictions_dataset$lm_pred - predictions_dataset$AHD)^2)
+```
+
+## Logit
+
+Estimate logit model
+```{r}
+logit_heart = glm(AHD ~., data = training_set,
+                  family = binomial(link = "logit"))
+summary(logit_heart)
+```
+
+Compute and plot the predicted values. Note, logit is a linear regression of log-odds on covariates. Without specifying type = "response", it will give you the predicted log-odds. Use `type = "response"` to convert these log-odds into probabilities using logistic function. 
+
+```{r}
+logit_pred = predict(logit_heart, newdata = test_set_x,
+                     type = "response")
+
+# add to a predictions dataset
+predictions_dataset = predictions_dataset %>%
+  add_column(logit_pred)
+
+# plotting predictions against actual values of AHD
+# plus regression line (with standard errors)
+ggplot(predictions_dataset, aes(x = logit_pred, y = AHD)) + 
+  geom_point() +
+  geom_smooth(method = "glm",
+              method.args = list(family = "binomial"),
+              se = TRUE)
+```
+
+Compute and store the MSE
+```{r}
+mse_logit = mean((predictions_dataset$logit_pred - predictions_dataset$AHD)^2)
+```
+
+
+## LPM with penalisation (Ridge, LASSO)
+
+Create matrix of training data covariates and y values for these glmnet regressions. Noe, `-1` removes column of intercepts.
+```{r}
+X = model.matrix(~. - 1, data = training_set_x)
+y = model.matrix(~. -1, data = training_set_y)
+```
+
+Ridge regression (alpha is lasso penalty, lambda is ridge penalty, so alpha = 0). If lambda is not explicitly chosen, `glmnet` fits the model for a sequence (100) of lambda values and provides regressions for each lambda. 
+
+```{r}
+# Ridge (alpha=0)
+ridge_lm = glmnet(X, y, alpha = 0)
+
+# LASSO (alpha = 1)
+lasso_lm = glmnet(X, y, alpha = 1)
+```
+
+Find optimal lambda using cross-validation
+```{r}
+cv_ridge = cv.glmnet(X, y, alpha = 0)
+plot(cv_ridge)
+cv_lasso = cv.glmnet(X, y, alpha = 0)
+plot(cv_lasso)
+```
+
+Can use minimum or highest lambda value within 1 se of the minimum value; i.e. statistically indistiguishable but encourages the most parsimony.
+
+```{r}
+best_lambda_ridge <- cv_ridge$lambda.min
+best_lambda_lasso <- cv_lasso$lambda.min
+```
+
+Re-estimate using cross-validated lambdas
+```{r}
+ridge_lm = glmnet(X, y, alpha = 0, lambda = best_lambda_ridge)
+coef(ridge_lm)
+lasso_lm = glmnet(X, y, alpha = 1, lambda = best_lambda_lasso)
+coef(lasso_lm)
+```
+
+Make predictions on test set
+
+```{r}
+X_test = model.matrix(~. - 1, data = test_set_x)
+ridge_lm_pred = predict(ridge_lm, newx = X_test, s = best_lambda_ridge)
+lasso_lm_pred = predict(lasso_lm, newx = X_test, s = best_lambda_lasso)
+```
+
+Add ridge and lasso logit predictions to predictions dataset
+```{r}
+predictions_dataset = predictions_dataset %>% 
+  bind_cols(ridge_lm_pred,
+            lasso_lm_pred) %>%
+  rename(ridge_lm_pred = last_col(offset = 1),
+         lasso_lm_pred = last_col())
+```
+
+Plotting predictions against actual values of AHD with regression line (with standard errors) for Ridge, 
+
+```{r}
+ggplot(predictions_dataset, aes(x = ridge_lm_pred, y = AHD)) + 
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE)
+```
+and then LASSO.
+```{r}
+ggplot(predictions_dataset, aes(x = lasso_lm_pred, y = AHD)) + 
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE)
+```
+
+Compute and store MSEs
+```{r}
+mse_lm_ridge = mean((predictions_dataset$ridge_lm_pred - predictions_dataset$AHD)^2)
+mse_lm_lasso = mean((predictions_dataset$lasso_lm_pred - predictions_dataset$AHD)^2)
+```
+
+## Logit with penalisation (Ridge, LASSO) 
+
+Estimate models
+```{r}
+# ridge regression (alpha = 0)
+ridge_logit = glmnet(X, y, family = "binomial", alpha = 0)
+
+# LASSO (alpha = 1)
+lasso_logit = glmnet(X, y, family = "binomial", alpha = 1)
+```
+
+Find optimal lambda using cross-validation
+```{r}
+cv_ridge <- cv.glmnet(X, y, family = "binomial", alpha = 0)
+plot(cv_ridge)
+cv_lasso <- cv.glmnet(X, y, family = "binomial", alpha = 1)
+plot(cv_lasso)
+
+# Best lambda values
+best_lambda_ridge <- cv_ridge$lambda.min
+best_lambda_lasso <- cv_lasso$lambda.min
+```
+
+Re-estimate using cross-validated lambdas
+```{r}
+ridge_logit = glmnet(X, y, family = "binomial",
+                     alpha = 0, lambda = best_lambda_ridge)
+coef(ridge_logit)
+lasso_logit = glmnet(X, y, family = "binomial",alpha = 1,
+                     lambda = best_lambda_lasso)
+coef(lasso_logit)
+```
+
+Outside of sample rediction plotted
+```{r}
+ridge_logit_pred = predict(ridge_logit, newx = X_test, s = best_lambda_ridge, type = "response")
+lasso_logit_pred = predict(lasso_logit, newx = X_test, s = best_lambda_lasso, type = "response")
+
+# add ridge and lasso logit predictions to predictions dataset
+predictions_dataset = predictions_dataset %>% 
+  bind_cols(ridge_logit_pred,
+            lasso_logit_pred) %>%
+  rename(ridge_logit_pred = last_col(offset = 1),
+         lasso_logit_pred = last_col())
+
+# plotting predictions against actual values of AHD
+# plus regression line (with standard errors)
+ggplot(predictions_dataset, aes(x = ridge_logit_pred, y = AHD)) + 
+  geom_point() +
+  geom_smooth(method = "glm",
+              method.args = list(family = "binomial"),
+              se = TRUE)
+```
+And for LASSO
+```{r}
+ggplot(predictions_dataset, aes(x = lasso_logit_pred, y = AHD)) + 
+  geom_point() +
+  geom_smooth(method = "glm",
+              method.args = list(family = "binomial"),
+              se = TRUE)
+```
+
+Compute and store MSE
+
+```{r}
+mse_logit_ridge = mean((predictions_dataset$ridge_logit_pred - predictions_dataset$AHD)^2)
+mse_logit_lasso = mean((predictions_dataset$lasso_logit_pred - predictions_dataset$AHD)^2)
+```
+
+## Regression tree (with `tree`)
+
+Begin by converting AHD to factor variable
+```{r}
+training_set_AHD_fact = training_set %>%
+  mutate(AHD = as.factor(AHD))
+```
+
+Estimate and plot tree using `tree`
+```{r}
+tree_heart = tree(AHD ~., data = training_set_AHD_fact)
+summary(tree_heart)
+tree_heart
+
+# plot tree
+plot(tree_heart)
+  text(tree_heart, pretty = 1)
+```
+
+Generate predicted values using `type = "vector"` to predict the probability that AHD = 1. Alternatively, can use `type = "class"` to predict the actual class. This produces 2 columns: the first has the probability AHD = 0 and the second the probability AHD = 1 (which is what we're interested in).
+
+```{r}
+tree_pred = predict(tree_heart, newdata = test_set_x, type = "vector")
+
+# add predictions to predictions dataset
+# note we only keep the 2nd column of `tree_pred` as explained above
+predictions_dataset = predictions_dataset %>% 
+  bind_cols(tree_pred[,2]) %>%
+  rename(tree_pred = last_col())
+
+# plot predicted values against actual values
+ggplot(predictions_dataset, aes(x = tree_pred, y = AHD)) + 
+  geom_point() +
+  geom_smooth(method = "lm",
+              se = TRUE)
+```
+
+Compute and store MSE. Note, this is the same as the misclassification rate
+for a binary (0/1) variable. Trees are very sensitive to the sample (overfits - high variance). The tendency to overfit is because of sequential design of trees.
+
+```{r}
+mse_tree = mean((predictions_dataset$AHD - predictions_dataset$tree_pred)^2)
+```
+
+### Pruned tree
+
+```{r}
+set.seed(789)
+cvtree_heart = cv.tree(tree_heart, FUN = prune.tree)
+names(cvtree_heart)
+cvtree_heart
+```
+
+Plot size of tree and cost-complexity parameter against deviance (number of misclassifications). We can visually see that a tree size of 6 (6 terminal nodes) gives minimal deviance. Increasing the tree size beyond that is resulting in overfitting.
+
+```{r}
+par(mfrow = c(1,2))
+plot(cvtree_heart$size, cvtree_heart$dev, type = "b")
+plot(cvtree_heart$k, cvtree_heart$dev, type = "b")
+#returning plots back to 1 plot per figure
+par(mfrow = c(1,1))
+
+# the minimal deviance obtains this value, 6
+optimal_size = cvtree_heart$size[which.min(cvtree_heart$dev)]
+optimal_size
+```
+
+Prune tree and generate new predicted values
+```{r}
+prune_heart = prune.tree(tree_heart, best = optimal_size)
+plot(prune_heart)
+  text(prune_heart, pretty = 1)
+  
+# generate predicted values from pruned tree
+prune_tree_pred = predict(prune_heart, newdata = test_set_x, type = "vector")
+
+# add predictions to predictions dataset
+predictions_dataset = predictions_dataset %>% 
+  bind_cols(prune_tree_pred[,2]) %>%
+  rename(prune_tree_pred = last_col())
+```
+
+Compute and store MSE. Note. this is the same as the misclassification rate for a binary (0/1) variable. 
+```{r}
+mse_prune_tree = mean((predictions_dataset$AHD - predictions_dataset$prune_tree_pred)^2)
+```
+
+## Regression tree (with `rpart`)
+
+AHD is a binary variable, so the `class` method is assumed
+```{r}
+tree_heart_rpart = rpart(AHD ~., data = training_set_AHD_fact, method = "class")
+summary(tree_heart_rpart)
+tree_heart_rpart
+# plot tree
+rpart.plot(tree_heart_rpart)
+```
+
+Generate and plot predicted values
+```{r}
+tree_pred_rpart = predict(tree_heart_rpart, newdata = test_set_x, type = "class")
+
+# add predictions to predictions dataset
+predictions_dataset = predictions_dataset %>% 
+  bind_cols(as.numeric(tree_pred_rpart)-1) %>%
+  rename(tree_pred_rpart = last_col())
+
+# plot predicted values against actual values
+ggplot(predictions_dataset, aes(x = tree_pred_rpart, y = AHD)) + 
+  geom_point() +
+  geom_smooth(method = "lm",
+              se = TRUE)
+```
+Compute and store MSE. Note, this is the same as the misclassification rate for a binary (0/1) variable. Trees are very sensitive to the sample (overfits - high variance). They have a tendency to overfit is because of sequential design of trees.
+```{r}
+mse_tree_rpart = mean((predictions_dataset$AHD - predictions_dataset$tree_pred_rpart)^2)
+```
+
+Plot cost-complexity parameter of tree
+```{r}
+plotcp(tree_heart_rpart)
+```
+
+Use CV to pick optimal cp parameter
+```{r}
+optimal_cp = tree_heart_rpart$cptable[which.min(tree_heart_rpart$cptable[,"xerror"]), "CP"]
+optimal_cp
+```
+
+Prune the tree
+```{r}
+prune_heart_rpart = prune(tree_heart_rpart, cp = optimal_cp)
+
+# plot pruned tree
+rpart.plot(prune_heart_rpart)
+```
+
+Generate predicted values from pruned tree. Note, these predictions are saved as factors.
+```{r}
+prune_tree_rpart_pred = predict(prune_heart_rpart, newdata = test_set_x, type = "class")
+
+# add predictions to predictions dataset
+predictions_dataset = predictions_dataset %>% 
+  bind_cols(as.numeric(prune_tree_rpart_pred)-1) %>%
+  rename(prune_tree_rpart_pred = last_col())
+```
+
+Compute and store MSE. Note, this is the same as the misclassification rate for a binary (0/1) variable.
+```{r}
+mse_prune_tree_rpart = mean((predictions_dataset$AHD - predictions_dataset$prune_tree_rpart_pred)^2)
+```
+
+## Bagging 
+
+```{r}
+set.seed(8)
+# number of regressors is total number of x variables
+bag_heart = randomForest(AHD ~., data = training_set_AHD_fact, mtry = ncol(training_set_AHD_fact)-1,
+                         importance = TRUE)
+bag_heart
+```
+Generate predictions
+```{r}
+bag_pred = predict(bag_heart, newdata = test_set_x)
+
+# add predictions to predictions dataset
+predictions_dataset = predictions_dataset %>% 
+  bind_cols(as.numeric(bag_pred)-1) %>%
+  rename(bag_pred = last_col())
+```
+Compute and store MSE. Note, this is the same as the misclassification rate for a binary (0/1) variable.
+
+```{r}
+mse_bag = mean((predictions_dataset$bag_pred - predictions_dataset$AHD)^2)
+```
+
+## Random Forest
+
+```{r}
+set.seed(9)
+# number of x variables selected for inclusion in each tree is lower than the number of x variables. I chose 5
+forest_heart = randomForest(AHD ~., data = training_set_AHD_fact, mtry = 5,
+                         importance = TRUE)
+forest_heart
+```
+
+Generate predictions
+```{r}
+forest_pred = predict(forest_heart, newdata = test_set_x)
+
+# add predictions to predictions dataset
+predictions_dataset = predictions_dataset %>% 
+  bind_cols(as.numeric(forest_pred)-1) %>%
+  rename(forest_pred = last_col())
+```
+
+Compute and store MSE. Note, this is the same as the misclassification rate for a binary (0/1) variable.
+```{r}
+mse_forest = mean((predictions_dataset$forest_pred - predictions_dataset$AHD)^2)
+```
+
+View importance of each variable
+```{r}
+importance(forest_heart)
+varImpPlot(forest_heart)
+```
+
+## Comparison
+
+```{r}
+# Get variables starting with "mse_"
+mse_vars = ls(pattern = "^mse_")
+
+# Create dataframe with variable names and values
+mse_df = data.frame(
+  method = sub("^mse_", "", mse_vars),
+  mse = sapply(mse_vars, get),
+  stringsAsFactors = FALSE)
+
+mse_df = mse_df %>%
+  arrange(mse)
+
+view(mse_df)
+mse_df
+```
+
+To view predictions_dataset for probabilistic/factor predictions under each model, run
+```{r, eval=FALSE}
+view(predictions_dataset)
+```
