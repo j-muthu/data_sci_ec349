@@ -15,7 +15,7 @@ heart_raw <- read_csv("Heart.csv")
 
 # converting categorical variables to factors
 heart_cleaned = heart_raw %>%
-  drop_na() %>%
+  drop_na() %>% # dropping any rows where any columns contain missing values
   mutate(across(c(ChestPain, Thal), factor)) %>%
   mutate(AHD = ifelse(AHD == "No",
                       0,
